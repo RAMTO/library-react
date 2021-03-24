@@ -219,22 +219,4 @@ export const globalStyle = `
   textarea {
     font-size: 16px;
   }
-
-  .form-label {
-      display: block;
-  }
-
-  .form-control {
-      padding: 12px 12px;
-      border-radius: 2px;
-      border: 1px solid rgb(${colors.darkGrey});
-  }
-
-  .text-left {
-      text-align: left;
-  }
-
-  .mt-5 {
-      margin-top: 24px;
-  }
 `

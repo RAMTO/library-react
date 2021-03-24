@@ -5,7 +5,6 @@ import Web3Modal from 'web3modal';
 // @ts-ignore
 import WalletConnectProvider from '@walletconnect/web3-provider';
 import Column from './components/Column';
-import Wrapper from './components/Wrapper';
 import Header from './components/Header';
 import Loader from './components/Loader';
 import ConnectButton from './components/ConnectButton';
@@ -25,22 +24,6 @@ const SLayout = styled.div`
   width: 100%;
   min-height: 100vh;
   text-align: center;
-`;
-
-const SContent = styled(Wrapper)`
-  width: 100%;
-  height: 100%;
-  padding: 0 16px;
-`;
-
-const SContainer = styled.div`
-  height: 100%;
-  min-height: 200px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  word-break: break-word;
 `;
 
 const SLanding = styled(Column)`
@@ -66,14 +49,20 @@ interface IAppState {
     libraryContract: any | null;
     info: any | null;
     transactionHash: string | null;
+    showTransactionHash: boolean;
     form: any | null;
     allAvailableBooks: IBook[];
+    allRentedBooks: IBook[];
+    isUserAdmin: boolean;
+    showErrorContainer: boolean;
+    errorContainer: string;
 }
 
 interface IBook {
     id: number;
     name: string;
     copies: number;
+    rentable?: boolean;
 }
 
 const INITIAL_STATE: IAppState = {
@@ -87,11 +76,16 @@ const INITIAL_STATE: IAppState = {
     libraryContract: null,
     info: null,
     transactionHash: '',
+    showTransactionHash: false,
     form: {
         bookName: "",
         bookCopies: 0,
     },
-    allAvailableBooks: []
+    allAvailableBooks: [],
+    allRentedBooks: [],
+    isUserAdmin: false,
+    showErrorContainer: false,
+    errorContainer: ''
 };
 
 class App extends React.Component<any, any> {
@@ -140,7 +134,7 @@ class App extends React.Component<any, any> {
 
         await this.subscribeToProviderEvents(this.provider);
 
-        // await this.getAvailableBooks();
+        await this.updateLibrary();
     };
 
     public subscribeToProviderEvents = async (provider: any) => {
@@ -150,6 +144,7 @@ class App extends React.Component<any, any> {
 
         provider.on("accountsChanged", this.changedAccount);
         provider.on("networkChanged", this.networkChanged);
+        provider.on("error", this.handleError);
         provider.on("close", this.close);
 
         await this.web3Modal.off('accountsChanged');
@@ -174,6 +169,8 @@ class App extends React.Component<any, any> {
         } else {
             await this.setState({ address: accounts[0] });
         }
+
+        this.updateLibrary();
     }
 
     public networkChanged = async (networkId: number) => {
@@ -208,62 +205,92 @@ class App extends React.Component<any, any> {
         await this.unSubscribe(this.provider);
 
         this.setState({ ...INITIAL_STATE });
-
     };
 
     public submitAddBook = async () => {
-        const { libraryContract } = this.state;
+        const { libraryContract, allAvailableBooks } = this.state;
         const { bookName, bookCopies } = this.state.form;
+
+        await this.setState({ showErrorContainer: false, errorContainer: "" });
+
+        // Check book name and copies
+        const bookAdded = allAvailableBooks.find(book => book.name === bookName.trim());
+
+        if (bookName.trim() === "") {
+            await this.setState({ showErrorContainer: true, errorContainer: "Book name should not be empty" });
+            return;
+        }
+
+        if (bookCopies < 1) {
+            await this.setState({ showErrorContainer: true, errorContainer: "Book copies should be > 0" });
+            return;
+        }
+
+        if (typeof bookAdded !== "undefined") {
+            await this.setState({ showErrorContainer: true, errorContainer: "Book already added" });
+            return;
+        }
 
         await this.setState({ fetching: true });
 
         const transaction = await libraryContract.addBook(bookName, parseInt(bookCopies, 10));
 
-        await this.setState({ transactionHash: transaction.hash });
+        await this.setState({ transactionHash: transaction.hash, showTransactionHash: true });
 
         const transactionReceipt = await transaction.wait();
 
         if (transactionReceipt.status !== 1) {
-            console.log("Failed transaction");
+            console.log(transactionReceipt);
+            await this.setState({ showErrorContainer: true, errorContainer: "Failed transaction" });
         }
 
-        await this.setState({ fetching: false });
+        await this.setState({ fetching: false, showTransactionHash: false });
+
+        this.getAvailableBooks();
     };
 
     public borrowBook = async (event: any) => {
         const { libraryContract } = this.state;
         const bookId = event.target.dataset.bookId;
+
         await this.setState({ fetching: true });
 
         const transaction = await libraryContract.borrowBook(bookId);
 
-        await this.setState({ transactionHash: transaction.hash });
+        await this.setState({ transactionHash: transaction.hash, showTransactionHash: true });
 
         const transactionReceipt = await transaction.wait();
 
         if (transactionReceipt.status !== 1) {
-            console.log("Failed transaction");
+            console.log(transactionReceipt);
+            await this.setState({ showErrorContainer: true, errorContainer: "Failed transaction" });
         }
 
-        await this.setState({ fetching: false });
+        await this.setState({ fetching: false, showTransactionHash: false });
+
+        this.updateLibrary();
     }
 
     public returnBook = async (event: any) => {
         const { libraryContract } = this.state;
         const bookId = event.target.dataset.bookId;
+
         await this.setState({ fetching: true });
 
         const transaction = await libraryContract.returnBook(bookId);
 
-        await this.setState({ transactionHash: transaction.hash });
+        await this.setState({ transactionHash: transaction.hash, showTransactionHash: true });
 
         const transactionReceipt = await transaction.wait();
 
         if (transactionReceipt.status !== 1) {
-            console.log("Failed transaction");
+            console.log(transactionReceipt);
+            await this.setState({ showErrorContainer: true, errorContainer: "Failed transaction" });
         }
 
-        await this.setState({ fetching: false });
+        await this.setState({ fetching: false, showTransactionHash: false });
+
+        this.updateLibrary();
     }
 
     public handleInputChange = async (event: any) => {
@@ -272,7 +299,7 @@ class App extends React.Component<any, any> {
     }
 
     public getAvailableBooks = async () => {
-        const { libraryContract } = this.state;
+        const { libraryContract, address } = this.state;
 
         await this.setState({ fetching: true });
 
@@ -283,18 +310,16 @@ class App extends React.Component<any, any> {
         for (let i = 0; i < allBooksLength; i++) {
             const bookId = await libraryContract.booksId(i)
             const { name, copies } = await libraryContract.booksInLibrary(bookId)
+            const rentable = !await libraryContract.borrowedBooksByUser(address, bookId)
             const book = {
                 id: bookId.toString(),
                 name,
-                copies
+                copies,
+                rentable
             };
 
-            if (copies > 0) {
-                allAvailableBooks.push(book)
-            }
+            allAvailableBooks.push(book)
         }
-
-        console.log(allAvailableBooks);
 
         await this.setState({
             allAvailableBooks,
@@ -308,7 +333,7 @@ class App extends React.Component<any, any> {
 
         const allBooksLength = parseInt(await libraryContract.getBooksLength(), 10)
 
-        const allBorrowed = []
+        const allRentedBooks = []
 
         for (let i = 0; i < allBooksLength; i++) {
             const bookId = await libraryContract.booksId(i)
@@ -320,23 +345,94 @@ class App extends React.Component<any, any> {
             };
 
             if (await libraryContract.borrowedBooksByUser(address, bookId)) {
-                allBorrowed.push(book)
+                allRentedBooks.push(book)
             }
         }
 
-        console.log(allBorrowed);
-
-        await this.setState({ fetching: false });
+        await this.setState({
+            allRentedBooks,
+            fetching: false
+        });
     }
 
-    public renderBooks = async () => {
-        const books = this.state.allAvailableBooks.map((b: any) => (`
-            <div>
-                ${b.name}
-            </div>
-        `));
+    public renderAvailableBooks = () => {
+        const bookRows = this.state.allAvailableBooks.map((b: any, index) => (
+            <tr key={index}>
+                <td>
+                    {b.name}
+                </td>
+                <td className="text-right">
+                    {b.copies}
+                </td>
+                <td className="text-right">
+                    {b.rentable && b.copies > 0 ? <button onClick={this.borrowBook} className="btn btn-sm btn-primary" data-book-id={b.id}>Rent book</button> : <span className="badge badge-warning">Rented</span>}
 
-        return books;
+                </td>
+            </tr>
+        ));
+
+        return (
+            <table className="table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th className="text-right">Copies</th>
+                        <th className="text-right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {bookRows}
+                </tbody>
+            </table>
+        );
+    }
+
+    public renderRentedBooks = () => {
+        const bookRows = this.state.allRentedBooks.map((b: any, index) => (
+            <tr key={index}>
+                <td>
+                    {b.name}
+                </td>
+                <td className="text-right">
+                    <button onClick={this.returnBook} className="btn btn-sm btn-primary" data-book-id={b.id}>Return book</button>
+                </td>
+            </tr>
+        ));
+
+        return (
+            <table className="table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th className="text-right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {bookRows}
+                </tbody>
+            </table>
+        );
+    }
+
+    public isUserAdmin = async () => {
+        const { libraryContract, address } = this.state;
+        const owner = await libraryContract.owner();
+
+        await this.setState({
+            isUserAdmin: owner.toLowerCase() === address
+        });
+    }
+
+    public updateLibrary = () => {
+        this.setState({ showErrorContainer: false, errorContainer: "" });
+        this.isUserAdmin();
+        this.getAvailableBooks();
+        this.getBooksByUser();
+    }
+
+    public handleError = (e: any) => {
+        // console.log(e);
+
     }
 
     public render = () => {
@@ -346,71 +442,100 @@ class App extends React.Component<any, any> {
             chainId,
             fetching,
             transactionHash,
-            allAvailableBooks
+            showTransactionHash,
+            allAvailableBooks,
+            allRentedBooks,
+            isUserAdmin,
+            showErrorContainer,
+            errorContainer
         } = this.state;
         return (
             <SLayout>
-                <Column maxWidth={1000} spanHeight>
+                <div className="container">
                     <Header
                         connected={connected}
                         address={address}
                         chainId={chainId}
                         killSession={this.resetApp}
                     />
-                    <SContent>
+                    <div>
                         {fetching ? (
-                            <Column center>
-                                <SContainer>
+                            <div>
+                                <div>
                                     <Loader />
-                                </SContainer>
-                                {transactionHash && (
-                                    <div>
-                                        <p>Transaction hash: <a target="_blank" href={`https://ropsten.etherscan.io/tx/${transactionHash}`}>transactionHash</a></p>
+                                </div>
+                                {showTransactionHash && (
+                                    <div className="alert alert-info text-left mt-5">
+                                        <p>You can view your transaction here: <a target="_blank" href={`https://ropsten.etherscan.io/tx/${transactionHash}`}>{transactionHash}</a></p>
                                     </div>
                                 )}
-                            </Column>
+                            </div>
                         ) : (
-                            <SLanding center>
-                                {!this.state.connected && <ConnectButton onClick={this.onConnect} />}
-                                <div className="text-left">
-                                    <form action="">
-                                        <div className="form-group">
-                                            <label className="form-label">Book name</label>
-                                            <input value={this.state.form.state} onChange={this.handleInputChange} className="form-control" type="text" name="bookName" />
-                                        </div>
+                            <div>
+                                <div className="text-center py-5">
+                                    {!this.state.connected && <ConnectButton onClick={this.onConnect} />}
+                                </div>
 
-                                        <div className="form-group mt-5">
-                                            <label className="form-label">Book copies</label>
-                                            <input value={this.state.form.trumpVotes} onChange={this.handleInputChange} className="form-control" type="number" name="bookCopies" />
-                                        </div>
-                                    </form>
+                                {isUserAdmin ?
+                                    <div className="row text-left">
+                                        <div className="col-lg-6">
+                                            {showErrorContainer &&
+                                                <div className="alert alert-danger my-5">
+                                                    {errorContainer}
+                                                </div>
+                                            }
+                                            <h4>Add book</h4>
 
-                                    <div className="mt-5">
-                                        <Button onClick={this.submitAddBook}>Add book</Button>
+                                            <form action="">
+                                                <div className="form-group mt-5">
+                                                    <label className="form-label">Book name</label>
+                                                    <input value={this.state.form.state} onChange={this.handleInputChange} className="form-control" type="text" name="bookName" />
+                                                </div>
+
+                                                <div className="form-group">
+                                                    <label className="form-label">Book copies</label>
+                                                    <input value={this.state.form.trumpVotes} onChange={this.handleInputChange} className="form-control" type="number" name="bookCopies" />
+                                                </div>
+                                                <div className="">
+                                                    <Button onClick={this.submitAddBook}>Add book</Button>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </div>
+                                    :
+                                    <div className="alert alert-info">
+                                        You can only borrow books
+                                    </div>
+                                }
+
+
+                                <div className="row text-left mt-5">
+                                    <div className="col-md-6">
+                                        <h4>Available books</h4>
+                                        {
+                                            allAvailableBooks && allAvailableBooks.length > 0 ?
+                                                this.renderAvailableBooks() :
+                                                <div className="alert alert-warning" role="alert">
+                                                    No books available!
+                                                </div>
+                                        }
+                                    </div>
+
+                                    <div className="col-md-6">
+                                        <h4>Rented books</h4>
+                                        {
+                                            allRentedBooks && allRentedBooks.length > 0 ?
+                                                this.renderRentedBooks() :
+                                                <div className="alert alert-warning" role="alert">
+                                                    No books rented!
+                                                </div>
+                                        }
                                     </div>
                                 </div>
-
-                                <div className="mt-5">
-                                    <Button onClick={this.getAvailableBooks}>Get available books</Button>
-                                    <Button onClick={this.getBooksByUser}>Get books by user</Button>
-                                </div>
-
-                                <div className="text-left mt-5">
-                                    {allAvailableBooks && allAvailableBooks.length > 0 ? this.renderBooks() : 'No books available!'}
-                                    {/* <p data-book-id="0x60d7b6fed2ea95de57c8ef53c3b2808dda26ae0506158186f67e7dcc03bfb537" onClick={this.borrowBook}>
-                                        Book 1
-                                    </p>
-                                    <p data-book-id="0xf2821cbf42868fd2036b83a332b15f771318e36dee06df6f0517790824ccf740" onClick={this.borrowBook}>
-                                        Book 2
-                                    </p>
-                                    <p data-book-id="0x6bde7124d2fb8d0ce9595073fd37441b7ad5aff3b7e06181ff6ccd09a805a13f">
-                                        Book 3
-                                    </p> */}
-                                </div>
-                            </SLanding>
+                            </div>
                         )}
-                    </SContent>
-                </Column>
+                    </div>
+                </div>
             </SLayout >
         );
     };
