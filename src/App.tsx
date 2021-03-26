@@ -12,12 +12,14 @@ import Button from './components/Button';
 
 import { Web3Provider } from '@ethersproject/providers';
 import { getChainData } from './helpers/utilities';
+import { ethers } from 'ethers';
 
 import {
     LIBRARY_ADDRESS
 } from './constants';
 import { getContract } from './helpers/ethers';
 import LIBRARY from './constants/abis/Library.json';
+import LIB from './constants/abis/LIB.json';
 
 const SLayout = styled.div`
   position: relative;
@@ -47,6 +49,7 @@ interface IAppState {
     pendingRequest: boolean;
     result: any | null;
     libraryContract: any | null;
+    tokenContract: any | null;
     info: any | null;
     transactionHash: string | null;
     showTransactionHash: boolean;
@@ -56,6 +59,9 @@ interface IAppState {
     isUserAdmin: boolean;
     showErrorContainer: boolean;
     errorContainer: string;
+    LIBBalance: number;
+    approvedBalance: number;
+    libraryBalance: number;
 }
 
 interface IBook {
@@ -74,6 +80,7 @@ const INITIAL_STATE: IAppState = {
     pendingRequest: false,
     result: null,
     libraryContract: null,
+    tokenContract: null,
     info: null,
     transactionHash: '',
     showTransactionHash: false,
@@ -85,7 +92,10 @@ const INITIAL_STATE: IAppState = {
     allRentedBooks: [],
     isUserAdmin: false,
     showErrorContainer: false,
-    errorContainer: ''
+    errorContainer: '',
+    LIBBalance: 0,
+    approvedBalance: 0,
+    libraryBalance: 0
 };
 
 class App extends React.Component<any, any> {
@@ -123,17 +133,20 @@ class App extends React.Component<any, any> {
         const address = this.provider.selectedAddress ? this.provider.selectedAddress : this.provider?.accounts[0];
 
         const libraryContract = getContract(LIBRARY_ADDRESS, LIBRARY.abi, library, address);
+        const tokenAddress = await libraryContract.LIBToken();
+
+        const tokenContract = getContract(tokenAddress, LIB.abi, library, address);
 
         await this.setState({
             library,
             chainId: network.chainId,
             address,
             connected: true,
-            libraryContract
+            libraryContract,
+            tokenContract
         });
 
         await this.subscribeToProviderEvents(this.provider);
-
         await this.updateLibrary();
     };
 
@@ -355,7 +368,75 @@ class App extends React.Component<any, any> {
         });
     }
 
+    public getUserBalance = async () => {
+        const { tokenContract, address } = this.state;
+
+        const LIBBalanceRaw = await tokenContract.balanceOf(address);
+        const LIBBalance = ethers.utils.formatEther(LIBBalanceRaw);
+
+        const approvedBalanceRaw = await tokenContract.allowance(address, LIBRARY_ADDRESS);
+        const approvedBalance = parseInt(ethers.utils.formatEther(approvedBalanceRaw), 10);
+
+        await this.setState({
+            LIBBalance,
+            approvedBalance
+        });
+    }
+
+    public getLibraryBalance = async () => {
+        const { tokenContract } = this.state;
+
+        const libraryBalanceRaw = await tokenContract.balanceOf(LIBRARY_ADDRESS);
+        const libraryBalance = parseInt(ethers.utils.formatEther(libraryBalanceRaw), 10);
+
+        await this.setState({
+            libraryBalance
+        });
+    }
+
+    public approveTx = async () => {
+        const bookPrice = ethers.utils.parseEther("1");
+        const { tokenContract } = this.state;
+
+        await this.setState({ fetching: true });
+
+        const transaction = await tokenContract.approve(LIBRARY_ADDRESS, bookPrice);
+
+        const transactionReceipt = await transaction.wait();
+
+        if (transactionReceipt.status !== 1) {
+            console.log(transactionReceipt);
+            await this.setState({ showErrorContainer: true, errorContainer: "Failed transaction" });
+        }
+
+        await this.setState({ fetching: false });
+
+        this.updateLibrary();
+    }
+
+    public withdrawFunds = async () => {
+        const { libraryBalance, libraryContract } = this.state;
+
+        await this.setState({ fetching: true });
+
+        const unwrapAmount = ethers.utils.parseEther(libraryBalance.toString());
+        const unwrapTx = await libraryContract.withdraw(unwrapAmount);
+
+        const transactionReceipt = await unwrapTx.wait();
+
+        if (transactionReceipt.status !== 1) {
+            console.log(transactionReceipt);
+            await this.setState({ showErrorContainer: true, errorContainer: "Failed transaction" });
+        }
+
+        await this.setState({ fetching: false });
+
+        this.updateLibrary();
+    }
+
     public renderAvailableBooks = () => {
+        const { approvedBalance } = this.state;
+
         const bookRows = this.state.allAvailableBooks.map((b: any, index) => (
             <tr key={index}>
                 <td>
@@ -365,8 +446,8 @@ class App extends React.Component<any, any> {
                     {b.copies}
                 </td>
                 <td className="text-right">
-                    {b.rentable && b.copies > 0 ? <button onClick={this.borrowBook} className="btn btn-sm btn-primary" data-book-id={b.id}>Rent book</button> : <span className="badge badge-warning">Rented</span>}
-
+                    {b.rentable && b.copies > 0 && approvedBalance < 1 && <button onClick={this.approveTx} className="btn btn-success btn-sm">Approve</button>}
+                    {approvedBalance >= 1 ? b.rentable && b.copies > 0 ? <button onClick={this.borrowBook} className="btn btn-sm btn-primary ml-2" data-book-id={b.id}>Rent book</button> : <span className="badge badge-warning">Rented</span> : ''}
                 </td>
             </tr>
         ));
@@ -425,6 +506,8 @@ class App extends React.Component<any, any> {
 
     public updateLibrary = () => {
         this.setState({ showErrorContainer: false, errorContainer: "" });
+        this.getUserBalance();
+        this.getLibraryBalance();
         this.isUserAdmin();
         this.getAvailableBooks();
         this.getBooksByUser();
@@ -432,7 +515,6 @@ class App extends React.Component<any, any> {
 
     public handleError = (e: any) => {
         // console.log(e);
-
     }
 
     public render = () => {
@@ -447,7 +529,9 @@ class App extends React.Component<any, any> {
             allRentedBooks,
             isUserAdmin,
             showErrorContainer,
-            errorContainer
+            errorContainer,
+            LIBBalance,
+            libraryBalance
         } = this.state;
         return (
             <SLayout>
@@ -484,6 +568,7 @@ class App extends React.Component<any, any> {
                                                     {errorContainer}
                                                 </div>
                                             }
+
                                             <h4>Add book</h4>
 
                                             <form action="">
@@ -501,6 +586,19 @@ class App extends React.Component<any, any> {
                                                 </div>
                                             </form>
                                         </div>
+
+                                        <div className="col-lg-6">
+                                            <div className="alert alert-info my-5">
+                                                <div className="d-flex justify-content-between align-items-center">
+                                                    <p>Library LIB balance:</p>
+                                                    <p>{libraryBalance}</p>
+                                                </div>
+
+                                                {libraryBalance !== 0 && <div className="mt-3">
+                                                    <button onClick={this.withdrawFunds} className="btn btn-success">Withdraw</button>
+                                                </div>}
+                                            </div>
+                                        </div>
                                     </div>
                                     :
                                     <div className="alert alert-info">
@@ -508,6 +606,12 @@ class App extends React.Component<any, any> {
                                     </div>
                                 }
 
+                                <div className="alert alert-info my-5">
+                                    <div className="d-flex justify-content-between align-items-center">
+                                        <p>LIB balance:</p>
+                                        <p>{LIBBalance}</p>
+                                    </div>
+                                </div>
 
                                 <div className="row text-left mt-5">
                                     <div className="col-md-6">
