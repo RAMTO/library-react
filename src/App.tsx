@@ -11,7 +11,7 @@ import ConnectButton from './components/ConnectButton';
 import Button from './components/Button';
 
 import { Web3Provider } from '@ethersproject/providers';
-import { getChainData } from './helpers/utilities';
+import { getChainData, showNotification } from './helpers/utilities';
 import { ethers } from 'ethers';
 
 import {
@@ -132,6 +132,12 @@ class App extends React.Component<any, any> {
 
         const address = this.provider.selectedAddress ? this.provider.selectedAddress : this.provider?.accounts[0];
 
+        // Check for valid addresses
+        if (!ethers.utils.isAddress(LIBRARY_ADDRESS)) {
+            await this.setState({ showErrorContainer: true, errorContainer: "Invalid contract address" });
+            return;
+        }
+
         const libraryContract = getContract(LIBRARY_ADDRESS, LIBRARY.abi, library, address);
         const tokenAddress = await libraryContract.LIBToken();
 
@@ -151,6 +157,8 @@ class App extends React.Component<any, any> {
     };
 
     public subscribeToProviderEvents = async (provider: any) => {
+        const { libraryContract, tokenContract } = this.state;
+
         if (!provider.on) {
             return;
         }
@@ -160,15 +168,35 @@ class App extends React.Component<any, any> {
         provider.on("error", this.handleError);
         provider.on("close", this.close);
 
+        const filterTransferEvents = tokenContract.filters.Transfer(
+            null, LIBRARY_ADDRESS, null
+        );
+
+        libraryContract.on("BookAdded", this.handleBookAddedEvent);
+        libraryContract.on("BookBorrowed", this.handleBookBorrowedEvent);
+        libraryContract.on("BookReturned", this.handleBookReturnedEvent);
+        tokenContract.on(filterTransferEvents, this.handleFilterTransferEvents);
+
         await this.web3Modal.off('accountsChanged');
     };
 
     public async unSubscribe(provider: any) {
+        const { libraryContract, tokenContract } = this.state;
+
         // Workaround for metamask widget > 9.0.3 (provider.off is undefined);
         window.location.reload(false);
         if (!provider.off) {
             return;
         }
+
+        const filterTransferEvents = tokenContract.filters.Transfer(
+            null, LIBRARY_ADDRESS, null
+        );
+
+        libraryContract.off("BookAdded", this.handleBookAddedEvent);
+        libraryContract.off("BookBorrowed", this.handleBookBorrowedEvent);
+        libraryContract.off("BookReturned", this.handleBookReturnedEvent);
+        tokenContract.off(filterTransferEvents, this.handleFilterTransferEvents);
 
         provider.off("accountsChanged", this.changedAccount);
         provider.off("networkChanged", this.networkChanged);
@@ -263,12 +291,21 @@ class App extends React.Component<any, any> {
     };
 
     public borrowBook = async (event: any) => {
-        const { libraryContract } = this.state;
         const bookId = event.target.dataset.bookId;
 
         await this.setState({ fetching: true });
 
-        const transaction = await libraryContract.borrowBook(bookId);
+        const iface = new ethers.utils.Interface(LIBRARY.abi);
+        const encodedData = iface.encodeFunctionData("borrowBook", [bookId]);
+        const library = new Web3Provider(this.provider);
+        const signer = library.getSigner();
+
+        const tx = {
+            to: LIBRARY_ADDRESS,
+            data: encodedData
+        };
+
+        const transaction = await signer.sendTransaction(tx);
 
         await this.setState({ transactionHash: transaction.hash, showTransactionHash: true });
 
@@ -513,6 +550,23 @@ class App extends React.Component<any, any> {
         this.getBooksByUser();
     }
 
+    public handleBookAddedEvent = (bookId: any) => {
+        showNotification(`Book added with id: ${bookId}`);
+    }
+
+    public handleBookBorrowedEvent = (bookId: any) => {
+        showNotification(`Book borrowed with id: ${bookId}`);
+    }
+
+    public handleBookReturnedEvent = (bookId: any) => {
+        showNotification(`Book returned with id: ${bookId}`);
+    }
+
+    public handleFilterTransferEvents = (from: any, to: any, value: any) => {
+        const formatedValue = ethers.utils.formatEther(value);
+        showNotification(`Transfered value to library ${formatedValue} LIB from ${from}`);
+    }
+
     public handleError = (e: any) => {
         // console.log(e);
     }
@@ -560,15 +614,15 @@ class App extends React.Component<any, any> {
                                     {!this.state.connected && <ConnectButton onClick={this.onConnect} />}
                                 </div>
 
+                                {showErrorContainer &&
+                                    <div className="alert alert-danger my-5">
+                                        {errorContainer}
+                                    </div>
+                                }
+
                                 {isUserAdmin ?
                                     <div className="row text-left">
                                         <div className="col-lg-6">
-                                            {showErrorContainer &&
-                                                <div className="alert alert-danger my-5">
-                                                    {errorContainer}
-                                                </div>
-                                            }
-
                                             <h4>Add book</h4>
 
                                             <form action="">
